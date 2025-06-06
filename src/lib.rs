@@ -36,27 +36,29 @@ impl LinearLayout {
         }
     }
 
-    // fn from_parts_infer_out_dim_sizes<N: Into<String>>(bases: BasesT, out_dim_names: &[N]) -> Self
-    // where
-    //     String: From<&N>,
-    // {
-    //     let out_dim_names: Vec<String> = out_dim_names.into_iter().map(|n| n.into()).collect();
-    //     let mut out_dims = HashMap::from_iter(out_dim_names.iter().cloned().map(|n| (n, 1)));
+    fn from_parts_infer_out_dim_sizes<N: Into<String> + Copy>(
+        bases: IndexMap<N, Vec<Vec<u32>>>,
+        out_dim_names: &[N],
+    ) -> Self {
+        let bases = IndexMap::from_iter(bases.into_iter().map(|(k, v)| (k.into(), v)));
 
-    //     for (in_dim, in_dim_bases) in &bases {
-    //         for basis in in_dim_bases {
-    //             for i in 0..basis.len() {
-    //                 let size: &mut u32 = out_dims.get_mut(&out_dim_names[i]).unwrap();
-    //                 *size = (*size).max(basis[i].next_power_of_two())
-    //             }
-    //         }
-    //     }
+        let out_dim_names: Vec<String> = out_dim_names.into_iter().map(|n| (*n).into()).collect();
+        let mut out_dims = IndexMap::from_iter(out_dim_names.iter().cloned().map(|n| (n, 1)));
 
-    //     let ll = LinearLayout::from_parts(bases, out_dims, true);
-    //     let err = ll.check_invariants(true);
-    //     err.expect("layout didn't respect invariants");
-    //     ll
-    // }
+        for (in_dim, in_dim_bases) in &bases {
+            for basis in in_dim_bases {
+                for i in 0..basis.len() {
+                    let size: &mut u32 = out_dims.get_mut(&out_dim_names[i]).unwrap();
+                    *size = (*size).max(basis[i].next_power_of_two())
+                }
+            }
+        }
+
+        let ll = LinearLayout::from_parts(bases, out_dims, true);
+        let err = ll.check_invariants(true);
+        assert!(err.is_none(), "layout didn't respect invariants");
+        ll
+    }
 
     pub fn empty() -> Self {
         Self::from_parts(IndexMap::new(), IndexMap::new(), true)
@@ -123,17 +125,6 @@ impl LinearLayout {
     }
 
     fn check_invariants(&self, require_surjective: bool) -> Option<String> {
-        for (in_dim, in_dim_bases) in &self.bases {
-            for basis in in_dim_bases {
-                if basis.iter().any(|x| *x < 0) {
-                    return Some(format!(
-                        "Invalid bases passed to LinearLayout. Expected all basis values to be non-negative, but found a negative value for in dimension '{}'. Full list of bases: {:?}\n",
-                        in_dim, self
-                    ));
-                }
-            }
-        }
-
         None
     }
 
@@ -199,13 +190,9 @@ mod tests {
         let layout = LinearLayout::identity_1d(32, "ins", "outs");
         assert_eq!(
             layout,
-            LinearLayout::from_parts(
-                IndexMap::from([(
-                    "ins".to_owned(),
-                    vec![vec![1], vec![2], vec![4], vec![8], vec![16]]
-                )]),
-                IndexMap::new(),
-                true
+            LinearLayout::from_parts_infer_out_dim_sizes(
+                IndexMap::from([("ins", vec![vec![1], vec![2], vec![4], vec![8], vec![16]])]),
+                &["outs"]
             )
         );
         assert_eq!(layout.bases.get("ins").unwrap().len(), 5);
