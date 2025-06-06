@@ -45,11 +45,11 @@ impl LinearLayout {
         let out_dim_names: Vec<String> = out_dim_names.into_iter().map(|n| (*n).into()).collect();
         let mut out_dims = IndexMap::from_iter(out_dim_names.iter().cloned().map(|n| (n, 1)));
 
-        for (in_dim, in_dim_bases) in &bases {
+        for in_dim_bases in bases.values() {
             for basis in in_dim_bases {
                 for i in 0..basis.len() {
                     let size: &mut u32 = out_dims.get_mut(&out_dim_names[i]).unwrap();
-                    *size = (*size).max(basis[i].next_power_of_two())
+                    *size = (*size).max((basis[i] + 1).next_power_of_two()) // the next STRICTLY GREATER
                 }
             }
         }
@@ -74,7 +74,7 @@ impl LinearLayout {
             return LinearLayout::empty();
         }
 
-        assert!(is_power_of_two(size));
+        assert!(is_power_of_two(size), "size must be a power of two");
         let mut bases = Vec::new();
         let mut i = 1;
         while i < size {
@@ -82,7 +82,6 @@ impl LinearLayout {
             i *= 2;
         }
         let requires_surjective = stride == 1;
-
         LinearLayout::from_parts(
             IndexMap::from([(in_dim.into(), bases)]),
             IndexMap::from([(out_dim.into(), stride * size)]),
@@ -97,7 +96,7 @@ impl LinearLayout {
     pub fn get_in_dim_size_log2(&self, in_dim: impl Into<String>) -> u32 {
         self.bases
             .get(&in_dim.into())
-            .expect("couldn't find out_dim in out_dims")
+            .expect("couldn't find in_dim in bases")
             .len() as u32
     }
 
@@ -106,10 +105,10 @@ impl LinearLayout {
     }
 
     pub fn get_out_dim_size_log2(&self, out_dim: impl Into<String>) -> u32 {
-        *(self
-            .out_dims
+        self.out_dims
             .get(&out_dim.into())
-            .expect("couldn't find out_dim in out_dims"))
+            .expect("couldn't find out_dim in out_dims")
+            .ilog2()
     }
 
     pub fn get_out_dim_size(&self, out_dim: impl Into<String>) -> u32 {
@@ -195,14 +194,25 @@ mod tests {
                 &["outs"]
             )
         );
-        assert_eq!(layout.bases.get("ins").unwrap().len(), 5);
-        assert_eq!(layout.get_out_dim_size("outs"), 32);
+        assert_eq!(layout.get_in_dim_names(), vec!["ins".to_owned()]);
+        assert_eq!(layout.get_out_dim_names(), vec!["outs".to_owned()]);
+        assert_eq!(layout.get_in_dim_size_log2("ins"), 5);
+        assert_eq!(layout.get_out_dim_size_log2("outs"), 5);
     }
 
     #[test]
     fn test_identity_1d_size1() {
         let layout = LinearLayout::identity_1d(1, "ins", "outs");
-        assert_eq!(layout.bases.get("ins").unwrap().len(), 0);
+        assert_eq!(
+            layout,
+            LinearLayout::from_parts_infer_out_dim_sizes(
+                IndexMap::from([("ins", vec![])]),
+                &["outs"]
+            )
+        );
+        assert_eq!(layout.get_in_dim_names(), vec!["ins".to_owned()]);
+        assert_eq!(layout.get_out_dim_names(), vec!["outs".to_owned()]);
+        assert_eq!(layout.get_in_dim_size_log2("ins"), 0);
         assert_eq!(layout.get_out_dim_size_log2("outs"), 0);
     }
 
