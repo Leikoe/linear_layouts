@@ -128,6 +128,14 @@ impl LinearLayout {
         out_indices
     }
 
+    /// Does the layout contain this input / output dimension?
+    fn has_in_dim(&self, dim: &str) -> bool {
+        self.bases.contains_key(dim)
+    }
+    fn has_out_dim(&self, dim: &str) -> bool {
+        self.out_dims.contains_key(dim)
+    }
+
     pub fn get_in_dim_size_log2(&self, in_dim: impl Into<String>) -> u32 {
         self.bases
             .get(&in_dim.into())
@@ -175,10 +183,101 @@ impl Mul for LinearLayout {
     type Output = LinearLayout;
 
     fn mul(self, outer: Self) -> Self::Output {
-        let in_dims = supremum(&self.get_in_dim_names(), &outer.get_in_dim_names()).unwrap();
-        let out_dims = supremum(&self.get_out_dim_names(), &outer.get_out_dim_names()).unwrap();
+        // ──────────────────────────────────────────────────────────
+        // 0.  Choose a common, consistent ordering for dimensions
+        //     (C++ calls this `supremum`).
+        // ──────────────────────────────────────────────────────────
+        let in_dims = supremum(&self.get_in_dim_names(), &outer.get_in_dim_names())
+            .expect("supremum on in-dims failed");
+        let out_dims = supremum(&self.get_out_dim_names(), &outer.get_out_dim_names())
+            .expect("supremum on out-dims failed");
 
-        // TODO: complete here
+        // ──────────────────────────────────────────────────────────
+        // 1.  Accumulate total bit-width (`log2(size)`) for every
+        //     input / output dimension appearing in either operand.
+        // ──────────────────────────────────────────────────────────
+        let mut in_dim_sizes_log2: IndexMap<String, u32> =
+            in_dims.iter().map(|d| (d.clone(), 0)).collect();
+        let mut out_dim_sizes_log2: IndexMap<String, u32> =
+            out_dims.iter().map(|d| (d.clone(), 0)).collect();
+
+        for layout in [&self, &outer] {
+            for dim in layout.get_in_dim_names() {
+                *in_dim_sizes_log2
+                    .get_mut(&dim)
+                    .expect("dim present by construction") +=
+                    layout.get_in_dim_size_log2(dim.clone());
+            }
+            for dim in layout.get_out_dim_names() {
+                *out_dim_sizes_log2
+                    .get_mut(&dim)
+                    .expect("dim present by construction") +=
+                    layout.get_out_dim_size_log2(dim.clone());
+            }
+        }
+
+        // Convenience lambdas for shorter code.
+        let inner = &self; // (n.b. `self` is moved, but we still own it)
+        let outer_ref = &outer; // just to stress we only read from `outer`
+
+        // ──────────────────────────────────────────────────────────
+        // 2.  Build the new basis table.
+        // ──────────────────────────────────────────────────────────
+        let n_out = out_dim_sizes_log2.len();
+        let mut all_bases: BasesT = IndexMap::new();
+
+        for (in_dim, &bits_in_dim) in &in_dim_sizes_log2 {
+            // Pre-allocate zero matrix [bits_in_dim × n_out].
+            let mut in_dim_bases = vec![vec![0u32; n_out]; bits_in_dim as usize];
+
+            for (out_idx, (out_dim, _)) in out_dim_sizes_log2.iter().enumerate() {
+                // ─────────────── contributions from `inner`
+                if inner.has_in_dim(in_dim) && inner.has_out_dim(out_dim) {
+                    for i in 0..inner.get_in_dim_size_log2(in_dim.clone()) {
+                        in_dim_bases[i as usize][out_idx] =
+                            inner.get_basis_value(in_dim, i, out_dim);
+                    }
+                }
+
+                // ─────────────── contributions from `outer`
+                if outer_ref.has_in_dim(in_dim) && outer_ref.has_out_dim(out_dim) {
+                    // Offset of this basis in the *concatenated* input dimension.
+                    let offset = if inner.has_in_dim(in_dim) {
+                        inner.get_in_dim_size_log2(in_dim.clone())
+                    } else {
+                        0
+                    };
+                    // Amount we must left-shift to account for lower-order
+                    // bits that `inner` already placed in this output dimension.
+                    let shift = if inner.has_out_dim(out_dim) {
+                        inner.get_out_dim_size_log2(out_dim.clone())
+                    } else {
+                        0
+                    };
+
+                    for i in 0..outer_ref.get_in_dim_size_log2(in_dim.clone()) {
+                        let v = outer_ref.get_basis_value(in_dim, i, out_dim) << shift;
+                        in_dim_bases[(offset + i) as usize][out_idx] = v;
+                    }
+                }
+            }
+
+            all_bases.insert(in_dim.clone(), in_dim_bases);
+        }
+
+        // ──────────────────────────────────────────────────────────
+        // 3.  Convert `log2(size)` maps → real sizes, assemble result.
+        // ──────────────────────────────────────────────────────────
+        let out_dim_sizes: IndexMap<String, u32> = out_dim_sizes_log2
+            .iter()
+            .map(|(d, &log2)| (d.clone(), 1u32 << log2))
+            .collect();
+
+        LinearLayout::from_parts(
+            all_bases,
+            out_dim_sizes,
+            inner.surjective && outer_ref.surjective,
+        )
     }
 }
 
@@ -279,51 +378,38 @@ mod tests {
     //     assert_eq!(layout.get_out_dim_size("outs"), 1);
     // }
 
-    // #[test]
-    // fn test_multiply_identity() {
-    //     let l1 = LinearLayout::identity1d(16, "in", "out");
-    //     let l2 = LinearLayout::identity1d(32, "in", "out");
-    //     let prod = l1.compose(&l2);
-    //     // Expect identity1d of size 32.
-    //     let expected = LinearLayout::identity1d(32, "in", "out");
-    //     assert_eq!(prod, expected);
-    // }
+    #[test]
+    fn test_multiply_disjoint() {
+        let prod = LinearLayout::identity_1d(32, "in1", "out1")
+            * LinearLayout::identity_1d(16, "in2", "out2");
+        assert_eq!(
+            prod,
+            LinearLayout::from_parts_infer_out_dim_sizes(
+                IndexMap::from([
+                    (
+                        "in1",
+                        vec![vec![1, 0], vec![2, 0], vec![4, 0], vec![8, 0], vec![16, 0],]
+                    ),
+                    ("in2", vec![vec![0, 1], vec![0, 2], vec![0, 4], vec![0, 8],])
+                ]),
+                &["out1", "out2"]
+            )
+        );
+        assert_eq!(
+            prod.get_in_dim_names(),
+            vec!["in1".to_owned(), "in2".to_owned()]
+        );
+        assert_eq!(
+            prod.get_out_dim_names(),
+            vec!["out1".to_owned(), "out2".to_owned()]
+        );
+    }
 
-    // #[test]
-    // fn test_multiply_disjoint() {
-    //     let l1 = LinearLayout::identity1d(32, "in1", "out1");
-    //     let l2 = LinearLayout::identity1d(16, "in2", "out2");
-    //     let prod = l1.compose(&l2);
-    //     // bases:
-    //     // in1: [{1,0}, {2,0}, {4,0}, {8,0}, {16,0}]
-    //     // in2: [{0,1}, {0,2}, {0,4}, {0,8}]
-    //     let mut expected_bases = BTreeMap::new();
-    //     expected_bases.insert(
-    //         "in1".to_string(),
-    //         vec![vec![1, 0], vec![2, 0], vec![4, 0], vec![8, 0], vec![16, 0]],
-    //     );
-    //     expected_bases.insert(
-    //         "in2".to_string(),
-    //         vec![vec![0, 1], vec![0, 2], vec![0, 4], vec![0, 8]],
-    //     );
-    //     let mut expected_out_dims = BTreeMap::new();
-    //     expected_out_dims.insert("out1".to_string(), 32);
-    //     expected_out_dims.insert("out2".to_string(), 16);
-    //     let expected = LinearLayout {
-    //         bases: expected_bases,
-    //         out_dims: expected_out_dims,
-    //         surjective: true,
-    //     };
-    //     assert_eq!(prod, expected);
-    // }
-
-    // #[test]
-    // fn test_multiply_by_empty() {
-    //     let empty = LinearLayout::empty();
-    //     let l = LinearLayout::identity1d(32, "in", "out");
-    //     let prod = empty.compose(&l);
-    //     assert_eq!(prod, l);
-    // }
+    #[test]
+    fn test_multiply_by_empty() {
+        let prod = LinearLayout::empty() * LinearLayout::identity_1d(32, "in", "out");
+        assert_eq!(prod, LinearLayout::identity_1d(32, "in", "out"));
+    }
 
     // #[test]
     // fn test_multiply_by_zeros() {
