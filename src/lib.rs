@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Mul};
 
 use algebra_ast::{BinaryOp, Expr, Type};
 use indexmap::IndexMap;
+use utils::supremum;
 
 mod algebra_ast;
+mod utils;
 
 fn is_power_of_two(n: u32) -> bool {
     // Exclude non‐positive numbers, then use the bit‐trick on the positive range.
@@ -93,6 +95,39 @@ impl LinearLayout {
         Self::strided_1d(size, 1, in_dim, out_dim)
     }
 
+    fn check_invariants(&self, require_surjective: bool) -> Option<String> {
+        None
+    }
+
+    fn apply<'a>(&self, indices: &HashMap<String, Expr>) -> HashMap<String, Expr> {
+        let mut out_indices = HashMap::new();
+        for out_dim_name in self.out_dims.keys() {
+            out_indices.insert(out_dim_name.clone(), Expr::u32_const(0));
+        }
+
+        for (in_dim_name, idx) in indices.iter() {
+            let n_bits = self.get_in_dim_size_log2(in_dim_name);
+            for i in 0..n_bits {
+                let bit = Expr::binary(BinaryOp::And, idx.clone(), Expr::u32_const(1 << i));
+                let bit_is_zero = Expr::binary(BinaryOp::Eq, bit, Expr::u32_const(0));
+                for (out_dim_name, out_idx) in out_indices.iter_mut() {
+                    let basis = self.get_basis_value(in_dim_name, i, out_dim_name);
+                    if basis == 0 {
+                        continue;
+                    }
+                    let basis_value = Expr::u32_const(basis);
+                    *out_idx = Expr::binary(
+                        BinaryOp::Xor,
+                        out_idx.clone(),
+                        Expr::select(bit_is_zero.clone(), Expr::u32_const(0), basis_value),
+                    );
+                }
+            }
+        }
+
+        out_indices
+    }
+
     pub fn get_in_dim_size_log2(&self, in_dim: impl Into<String>) -> u32 {
         self.bases
             .get(&in_dim.into())
@@ -123,10 +158,6 @@ impl LinearLayout {
         self.out_dims.keys().cloned().collect()
     }
 
-    fn check_invariants(&self, require_surjective: bool) -> Option<String> {
-        None
-    }
-
     fn get_out_dim_index(&self, out_dim_name: &String) -> usize {
         self.out_dims.get_index_of(out_dim_name).unwrap()
     }
@@ -138,34 +169,16 @@ impl LinearLayout {
     fn get_basis_value(&self, in_dim_name: &String, pos: u32, out_dim_name: &String) -> u32 {
         self.get_basis(in_dim_name, pos)[self.get_out_dim_index(out_dim_name)]
     }
+}
 
-    fn apply<'a>(&self, indices: &HashMap<String, Expr>) -> HashMap<String, Expr> {
-        let mut out_indices = HashMap::new();
-        for out_dim_name in self.out_dims.keys() {
-            out_indices.insert(out_dim_name.clone(), Expr::u32_const(0));
-        }
+impl Mul for LinearLayout {
+    type Output = LinearLayout;
 
-        for (in_dim_name, idx) in indices.iter() {
-            let n_bits = self.get_in_dim_size_log2(in_dim_name);
-            for i in 0..n_bits {
-                let bit = Expr::binary(BinaryOp::And, idx.clone(), Expr::u32_const(1 << i));
-                let bit_is_zero = Expr::binary(BinaryOp::Eq, bit, Expr::u32_const(0));
-                for (out_dim_name, out_idx) in out_indices.iter_mut() {
-                    let basis = self.get_basis_value(in_dim_name, i, out_dim_name);
-                    if basis == 0 {
-                        continue;
-                    }
-                    let basis_value = Expr::u32_const(basis);
-                    *out_idx = Expr::binary(
-                        BinaryOp::Xor,
-                        out_idx.clone(),
-                        Expr::select(bit_is_zero.clone(), Expr::u32_const(0), basis_value),
-                    );
-                }
-            }
-        }
+    fn mul(self, outer: Self) -> Self::Output {
+        let in_dims = supremum(&self.get_in_dim_names(), &outer.get_in_dim_names()).unwrap();
+        let out_dims = supremum(&self.get_out_dim_names(), &outer.get_out_dim_names()).unwrap();
 
-        out_indices
+        // TODO: complete here
     }
 }
 
@@ -224,7 +237,35 @@ mod tests {
 
         let out_idx = idx["outs"].clone();
         let result = rewrite_fixpoint(out_idx, &RULES);
-        println!("{}", result);
+        println!("{}", result); // TODO: assert something
+    }
+
+    #[test]
+    fn test_multiply_identity() {
+        let prod =
+            LinearLayout::identity_1d(16, "in", "out") * LinearLayout::identity_1d(32, "in", "out");
+        assert_eq!(
+            prod,
+            LinearLayout::from_parts_infer_out_dim_sizes(
+                IndexMap::from([(
+                    "in",
+                    vec![
+                        vec![1],
+                        vec![2],
+                        vec![4],
+                        vec![8],
+                        vec![16],
+                        vec![32],
+                        vec![64],
+                        vec![128],
+                        vec![256]
+                    ]
+                )]),
+                &["out"]
+            )
+        );
+        assert_eq!(prod.get_in_dim_names(), vec!["in".to_owned()]);
+        assert_eq!(prod.get_out_dim_names(), vec!["out".to_owned()]);
     }
 
     // #[test]
